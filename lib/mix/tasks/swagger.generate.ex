@@ -32,13 +32,10 @@ defmodule Mix.Tasks.Phx.Swagger.Generate do
     Mix.Task.reenable("phx.swagger.generate")
     Code.append_path(Mix.Project.compile_path())
 
-    swagger_files =
-      app_name()
-      |> Application.get_env(:phoenix_swagger, [])
-      |> Keyword.get(:swagger_files, %{})
+    swagger_files = get_swagger_files()
 
     if Enum.empty?(swagger_files) && !Mix.Task.recursing?() do
-      Logger.warn("""
+      Logger.warning("""
       No swagger configuration found. Ensure phoenix_swagger is configured, eg:
 
       config #{inspect(app_name())}, :phoenix_swagger,
@@ -48,18 +45,30 @@ defmodule Mix.Tasks.Phx.Swagger.Generate do
       """)
     end
 
-    Enum.each(swagger_files, fn {output_file, config} ->
-      result =
-        with {:ok, router} <- attempt_load(config[:router]),
-             {:ok, endpoint} <- attempt_load(config[:endpoint]) do
-          write_file(output_file, swagger_document(router, endpoint))
-        end
+    generate(project: Mix.Project.get(), swagger_files: swagger_files)
+  end
 
-      case result do
-        :ok -> :ok
-        {:error, reason} -> Logger.warn("Failed to generate #{output_file}: #{reason}")
+  def generate(otp_app) when is_atom(otp_app), do: generate(swagger_files: get_swagger_files(otp_app))
+
+  def generate(opts) when is_list(opts) do
+    swagger_files = opts[:swagger_files] || get_swagger_files()
+    project = opts[:project]
+
+    Enum.each(swagger_files, fn {output_file, config} ->
+      with {:ok, router} <- attempt_load(config[:router]),
+           {:ok, endpoint} <- attempt_load(config[:endpoint]) do
+        write_file(output_file, swagger_document(project, router, endpoint))
+        :ok
+      else
+        {:error, reason} -> Logger.warning("Failed to generate #{output_file}: #{reason}")
       end
     end)
+  end
+
+  defp get_swagger_files(otp_app \\ app_name()) do
+    otp_app
+    |> Application.get_env(:phoenix_swagger, [])
+    |> Keyword.get(:swagger_files, %{})
   end
 
   defp write_file(output_file, contents) do
@@ -88,23 +97,23 @@ defmodule Mix.Tasks.Phx.Swagger.Generate do
     end
   end
 
-  defp swagger_document(router, endpoint) do
+  defp swagger_document(router, endpoint, project) do
     router
-    |> collect_info()
+    |> collect_info(project)
     |> collect_host(endpoint)
     |> collect_paths(router)
     |> collect_definitions(router)
     |> PhoenixSwagger.json_library().encode!(pretty: true)
   end
 
-  defp collect_info(router) do
+  defp collect_info(router, project) do
     cond do
       function_exported?(router, :swagger_info, 0) ->
         Map.merge(default_swagger_info(), router.swagger_info())
 
-      function_exported?(Mix.Project.get(), :swagger_info, 0) ->
+      function_exported?(project, :swagger_info, 0) ->
         info =
-          Mix.Project.get().swagger_info()
+          project.swagger_info()
           |> Keyword.put_new(:title, @default_title)
           |> Keyword.put_new(:version, @default_version)
           |> Enum.into(%{})
@@ -158,6 +167,7 @@ defmodule Mix.Tasks.Phx.Swagger.Generate do
     swagger_fun = "swagger_path_#{action}" |> String.to_atom()
 
     loaded? = Code.ensure_compiled(controller)
+
     case loaded? do
       {:module, _} ->
         %{
@@ -166,8 +176,9 @@ defmodule Mix.Tasks.Phx.Swagger.Generate do
           path: format_path(path),
           verb: verb
         }
+
       _ ->
-        Logger.warn("Warning: #{controller} module didn't load.")
+        Logger.warning("Warning: #{controller} module didn't load.")
         nil
     end
   end
